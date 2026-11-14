@@ -1,0 +1,234 @@
+diff --git a/flutter/lib/consts.dart b/flutter/lib/consts.dart
+index ed14e34..18f108e 100644
+--- a/flutter/lib/consts.dart
++++ b/flutter/lib/consts.dart
+@@ -159,6 +159,11 @@ const String kOptionRemoteMenubarEdge = "remote-menubar-edge";
+ const String kOptionRemoteMenubarFraction = "remote-menubar-frac";
+ const String kOptionAllowMultiEdgeToolbarDock =
+     "allow-multi-edge-toolbar-dock";
++// Show the remote toolbar as a fixed bar at the top of the session instead of
++// a floating panel drawn over the remote image.
++const String kOptionDockedToolbarBar = "docked-toolbar-bar";
++// kButtonSize (32) + 2 * kButtonVMargin (6) of the toolbar buttons.
++const double kDockedToolbarBarHeight = 44.0;
+ const String kOptionHideAbTagsPanel = "hideAbTagsPanel";
+ const String kOptionRemoteMenubarState = "remoteMenubarState";
+ const String kOptionPeerSorting = "peer-sorting";
+diff --git a/flutter/lib/desktop/pages/desktop_setting_page.dart b/flutter/lib/desktop/pages/desktop_setting_page.dart
+index 730d758..f18b588 100644
+--- a/flutter/lib/desktop/pages/desktop_setting_page.dart
++++ b/flutter/lib/desktop/pages/desktop_setting_page.dart
+@@ -541,6 +541,16 @@ class _GeneralState extends State<_General> {
+             reloadAllWindows();
+           },
+         ),
++      if (!incomingOnly)
++        _OptionCheckBox(
++          context,
++          'docked-toolbar-bar',
++          kOptionDockedToolbarBar,
++          isServer: false,
++          update: (_) {
++            reloadAllWindows();
++          },
++        ),
+       if (!isWeb && !outgoingOnly)
+         _OptionCheckBox(context, 'Adaptive bitrate', kOptionEnableAbr),
+       if (!isWeb) wallpaper(),
+diff --git a/flutter/lib/desktop/pages/remote_page.dart b/flutter/lib/desktop/pages/remote_page.dart
+index 15a6ce6..2fc2cab 100644
+--- a/flutter/lib/desktop/pages/remote_page.dart
++++ b/flutter/lib/desktop/pages/remote_page.dart
+@@ -729,12 +729,18 @@ class _RemotePageState extends State<RemotePage>
+             }
+           },
+           setRemoteState: setState,
++          docked: stateGlobal.dockedToolbarBar,
+         );
+ 
++    // Space reserved at the top for the docked toolbar bar (0 when floating).
++    final dockedBarHeight = stateGlobal.dockedToolbarBarHeight;
++
+     bodyWidget() {
+       return Stack(
+         children: [
+-          Container(
++          Padding(
++            padding: EdgeInsets.only(top: dockedBarHeight),
++            child: Container(
+               color: kColorCanvas,
+               child: RawKeyFocusScope(
+                   focusNode: _rawKeyFocusNode,
+@@ -760,6 +766,7 @@ class _RemotePageState extends State<RemotePage>
+                   },
+                   inputModel: _ffi.inputModel,
+                   child: getBodyForDesktop(context))),
++          ),
+           Stack(
+             children: [
+               _ffi.ffiModel.pi.isSet.isTrue &&
+diff --git a/flutter/lib/desktop/pages/view_camera_page.dart b/flutter/lib/desktop/pages/view_camera_page.dart
+index 3b87d91..8923ed7 100644
+--- a/flutter/lib/desktop/pages/view_camera_page.dart
++++ b/flutter/lib/desktop/pages/view_camera_page.dart
+@@ -273,14 +273,21 @@ class _ViewCameraPageState extends State<ViewCameraPage>
+             }
+           },
+           setRemoteState: setState,
++          docked: stateGlobal.dockedToolbarBar,
+         );
+ 
++    // Space reserved at the top for the docked toolbar bar (0 when floating).
++    final dockedBarHeight = stateGlobal.dockedToolbarBarHeight;
++
+     bodyWidget() {
+       return Stack(
+         children: [
+-          Container(
+-            color: kColorCanvas,
+-            child: getBodyForDesktop(context),
++          Padding(
++            padding: EdgeInsets.only(top: dockedBarHeight),
++            child: Container(
++              color: kColorCanvas,
++              child: getBodyForDesktop(context),
++            ),
+           ),
+           Stack(
+             children: [
+diff --git a/flutter/lib/desktop/widgets/remote_toolbar.dart b/flutter/lib/desktop/widgets/remote_toolbar.dart
+index 9d75d90..0f4d8dd 100644
+--- a/flutter/lib/desktop/widgets/remote_toolbar.dart
++++ b/flutter/lib/desktop/widgets/remote_toolbar.dart
+@@ -444,6 +444,9 @@ class RemoteToolbar extends StatefulWidget {
+   final Function(int, Function(bool)) onEnterOrLeaveImageSetter;
+   final Function(int) onEnterOrLeaveImageCleaner;
+   final Function(VoidCallback) setRemoteState;
++  // When true, render a fixed bar (see kOptionDockedToolbarBar) instead of the
++  // floating, draggable toolbar.
++  final bool docked;
+ 
+   RemoteToolbar({
+     Key? key,
+@@ -453,6 +456,7 @@ class RemoteToolbar extends StatefulWidget {
+     required this.onEnterOrLeaveImageSetter,
+     required this.onEnterOrLeaveImageCleaner,
+     required this.setRemoteState,
++    this.docked = false,
+   }) : super(key: key);
+ 
+   @override
+@@ -690,6 +694,9 @@ class _RemoteToolbarState extends State<RemoteToolbar> {
+           !_dockingOptionsInitialized.value) {
+         return const SizedBox.shrink();
+       }
++      if (widget.docked) {
++        return _buildDockedBar(context);
++      }
+       // If toolbar is hidden, return empty widget
+       if (hide.value) {
+         return const SizedBox.shrink();
+@@ -802,8 +809,57 @@ class _RemoteToolbarState extends State<RemoteToolbar> {
+ 
+   Widget _buildToolbar(
+       BuildContext context, _ToolbarEdge edge, bool isHorizontal) {
++    final toolbarItems = _buildToolbarItems(edge);
++    return _buildToolbarFrame(context, edge, isHorizontal, toolbarItems);
++  }
++
++  /// The fixed bar shown at the top of the session in docked mode. It reserves
++  /// its own space (see [StateGlobal.tabBarHeight]); it is not drawn over the
++  /// remote image and has no pin / collapse / drag handle.
++  Widget _buildDockedBar(BuildContext context) {
++    final items = _buildToolbarItems(_ToolbarEdge.top, includePin: false);
++    final barColor = Theme.of(context)
++            .menuBarTheme
++            .style
++            ?.backgroundColor
++            ?.resolve(MaterialState.values.toSet()) ??
++        Theme.of(context).colorScheme.background;
++    return Align(
++      alignment: Alignment.topCenter,
++      child: SizedBox(
++        height: kDockedToolbarBarHeight,
++        width: double.infinity,
++        child: Material(
++          color: barColor,
++          elevation: _ToolbarTheme.elevation,
++          shadowColor: MyTheme.color(context).shadow,
++          child: Theme(
++            data: themeData(),
++            // Scroll horizontally instead of overflowing on narrow windows,
++            // and keep the buttons centered when there is room.
++            child: LayoutBuilder(
++              builder: (context, constraints) => SingleChildScrollView(
++                scrollDirection: Axis.horizontal,
++                child: ConstrainedBox(
++                  constraints: BoxConstraints(minWidth: constraints.maxWidth),
++                  child: Row(
++                    mainAxisSize: MainAxisSize.min,
++                    mainAxisAlignment: MainAxisAlignment.center,
++                    children: items,
++                  ),
++                ),
++              ),
++            ),
++          ),
++        ),
++      ),
++    );
++  }
++
++  List<Widget> _buildToolbarItems(_ToolbarEdge edge,
++      {bool includePin = true}) {
+     final List<Widget> toolbarItems = [];
+-    toolbarItems.add(_PinMenu(state: widget.state));
++    if (includePin) toolbarItems.add(_PinMenu(state: widget.state));
+     toolbarItems.add(Obx(() {
+       final privacyModeState = PrivacyModeState.find(widget.id);
+       if ((privacyModeState.isEmpty ||
+@@ -852,6 +908,11 @@ class _RemoteToolbarState extends State<RemoteToolbar> {
+     }
+     if (!isWeb) toolbarItems.add(_RecordMenu());
+     toolbarItems.add(_CloseMenu(id: widget.id, ffi: widget.ffi));
++    return toolbarItems;
++  }
++
++  Widget _buildToolbarFrame(BuildContext context, _ToolbarEdge edge,
++      bool isHorizontal, List<Widget> toolbarItems) {
+     final toolbarBorderRadius = BorderRadius.all(Radius.circular(4.0));
+     // innerAxis: how the toolbar icons themselves flow.
+     // outerAxis: how the toolbar block and the handle stack against each other
+@@ -1546,7 +1607,9 @@ class ScreenAdjustor {
+             : 0.0;
+         final windowEdge = kWindowBorderWidth + resizePadding;
+         horizontalEdges = windowEdge * 2;
+-        verticalEdges = kDesktopRemoteTabBarHeight + windowEdge * 2;
++        verticalEdges = kDesktopRemoteTabBarHeight +
++            stateGlobal.dockedToolbarBarHeight +
++            windowEdge * 2;
+       } else {
+         horizontalEdges = CanvasModel.leftToEdge + CanvasModel.rightToEdge;
+         verticalEdges = CanvasModel.topToEdge + CanvasModel.bottomToEdge;
+diff --git a/flutter/lib/models/state_model.dart b/flutter/lib/models/state_model.dart
+index 77195d6..0d258ee 100644
+--- a/flutter/lib/models/state_model.dart
++++ b/flutter/lib/models/state_model.dart
+@@ -40,7 +40,16 @@ class StateGlobal {
+   int get windowId => _windowId;
+   RxBool get fullscreen => _fullscreen;
+   bool get isMinimized => _isMinimized;
+-  double get tabBarHeight => fullscreen.isTrue ? 0 : kDesktopRemoteTabBarHeight;
++  // Cached: changing the option reloads all windows (see settings page).
++  bool? _dockedToolbarBar;
++  bool get dockedToolbarBar => _dockedToolbarBar ??=
++      isDesktop && mainGetLocalBoolOptionSync(kOptionDockedToolbarBar);
++  double get dockedToolbarBarHeight =>
++      dockedToolbarBar ? kDockedToolbarBarHeight : 0;
++  // The docked toolbar bar stays visible in fullscreen, the tab bar does not.
++  double get tabBarHeight =>
++      (fullscreen.isTrue ? 0 : kDesktopRemoteTabBarHeight) +
++      dockedToolbarBarHeight;
+   RxBool get showTabBar => _showTabBar;
+   RxDouble get resizeEdgeSize => _resizeEdgeSize;
+   RxDouble get windowBorderWidth => _windowBorderWidth;
